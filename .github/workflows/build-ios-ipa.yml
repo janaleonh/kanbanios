@@ -1,160 +1,177 @@
-name: Build Unsigned iOS IPA
+name: Build Unsigned iOS IPA (Sideloadly / AltStore)
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
 
 jobs:
   build-ipa:
+    name: Build iOS .ipa on macOS
     runs-on: macos-15
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Node
+      - name: Select newest stable Xcode on runner
+        run: |
+          ls -d /Applications/Xcode*.app
+          CHOSEN=$(ls -d /Applications/Xcode*.app | grep -vi beta | sort -V | tail -n 1)
+          sudo xcode-select -s "$CHOSEN"
+          xcodebuild -version
+          swift --version
+
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Patch ExpoModulesJSI for Xcode Swift compatibility
+      - name: Patch ExpoModulesJSI for installed Swift version
         run: |
-          python3 - << 'EOF'
-          import re
-          base = "node_modules/expo-modules-jsi/apple"
+          node -e '
+            const fs = require("fs");
+            const base = "node_modules/expo-modules-jsi/apple";
 
-          p = base + "/Package.swift"
-          t = open(p).read()
-          t = t.replace("swiftLanguageModes: [.v6]", "swiftLanguageModes: [.v5]")
-          t = t.replace('.enableUpcomingFeature("NonisolatedNonsendingByDefault"),', "")
-          t = t.replace('.enableUpcomingFeature("InferIsolatedConformances"),', "")
-          t = re.sub(r'\s*"-Werror",\s*"[A-Za-z]+",', "", t)
-          open(p, "w").write(t)
-          assert ".v5" in t
+            let pkg = fs.readFileSync(base + "/Package.swift", "utf8");
+            pkg = pkg.replace(/\/\/ swift-tools-version:\s*6\.2/, "// swift-tools-version: 6.1");
+            pkg = pkg.replace("swiftLanguageModes: [.v6]", "swiftLanguageModes: [.v5]");
+            pkg = pkg.replace(".enableUpcomingFeature(\"NonisolatedNonsendingByDefault\"),", "");
+            pkg = pkg.replace(".enableUpcomingFeature(\"InferIsolatedConformances\"),", "");
+            pkg = pkg.replace(/\s*\"-Werror\",\s*\"[A-Za-z]+\",/g, "");
+            fs.writeFileSync(base + "/Package.swift", pkg);
 
-          p = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptObject.swift"
-          t = open(p).read()
-          t = t.replace(
+            let rt = fs.readFileSync(base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift", "utf8");
+            rt = rt.replace(
+              "name.wholeMatch(of: /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)",
+              "name.wholeMatch(of: try! Regex(#\"^[a-zA-Z_$][a-zA-Z0-9_$]*$\"#))"
+            );
+            fs.writeFileSync(base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift", rt);
+
+            let promPath = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptPromise.swift";
+            let prom = fs.readFileSync(promPath, "utf8")
+              .replace("func allowRelease() {", "nonisolated init() {}\n\n    func allowRelease() {");
+            fs.writeFileSync(promPath, prom);
+
+            const objPath = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptObject.swift";
+            let obj = fs.readFileSync(objPath, "utf8");
+            obj = obj.replace(
               "nonisolated(unsafe) let slot = buffer.baseAddress!",
               "nonisolated(unsafe) let slot = buffer.baseAddress!\n    let sendableSlot = UncheckedSendable(slot)"
-          )
-          t = t.replace(
+            );
+            obj = obj.replace(
               "try encode(JavaScriptValue.Slot(slot), runtime)",
               "try encode(JavaScriptValue.Slot(sendableSlot.value), runtime)"
-          )
-          open(p, "w").write(t)
+            );
+            fs.writeFileSync(objPath, obj);
 
-          p = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptFunction.swift"
-          t = open(p).read()
-          old = """      nonisolated(unsafe) let arguments = storage.baseAddress!
-                nonisolated(unsafe) let result = arguments + argumentCount
-                for index in 0...argumentCount {
-                  expo.emplaceUndefined(arguments + index)
-                }
-                defer {
-                  expo.destroyValues(arguments, argumentCount + 1)
-                }
-                try JavaScriptActor.assumeIsolated {
-                  try emplacing(JavaScriptValuesBuffer(runtime, start: arguments, count: argumentCount), runtime)
-                }
-                try throwCppErrorUnlessSucceeded(
-                  expo.callFunctionInto(runtime.pointee, pointee, arguments, argumentCount, result)
-                )
-                try JavaScriptActor.assumeIsolated {
-                  try withResult(JavaScriptUnownedValue(runtime.pointee, result), runtime)
-                }"""
-          new = """      let arguments = UncheckedSendable(storage.baseAddress!)
-                let result = UncheckedSendable(arguments.value + argumentCount)
-                for index in 0...argumentCount {
-                  expo.emplaceUndefined(arguments.value + index)
-                }
-                defer {
-                  expo.destroyValues(arguments.value, argumentCount + 1)
-                }
-                try JavaScriptActor.assumeIsolated {
-                  try emplacing(JavaScriptValuesBuffer(runtime, start: arguments.value, count: argumentCount), runtime)
-                }
-                try throwCppErrorUnlessSucceeded(
-                  expo.callFunctionInto(runtime.pointee, pointee, arguments.value, argumentCount, result.value)
-                )
-                try JavaScriptActor.assumeIsolated {
-                  try withResult(JavaScriptUnownedValue(runtime.pointee, result.value), runtime)
-                }"""
-          assert old in t
-          open(p, "w").write(t.replace(old, new))
+            const fnPath = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptFunction.swift";
+            let fn = fs.readFileSync(fnPath, "utf8");
+            fn = fn.replace("nonisolated(unsafe) let arguments = storage.baseAddress!", "let arguments = UncheckedSendable(storage.baseAddress!)");
+            fn = fn.replace("nonisolated(unsafe) let result = arguments + argumentCount", "let result = UncheckedSendable(arguments.value + argumentCount)");
+            fn = fn.replace("arguments + index", "arguments.value + index");
+            fn = fn.replace("expo.destroyValues(arguments, argumentCount + 1)", "expo.destroyValues(arguments.value, argumentCount + 1)");
+            fn = fn.replace("start: arguments, count: argumentCount", "start: arguments.value, count: argumentCount");
+            fn = fn.replace("pointee, arguments, argumentCount, result)", "pointee, arguments.value, argumentCount, result.value)");
+            fn = fn.replace("JavaScriptUnownedValue(runtime.pointee, result), runtime)", "JavaScriptUnownedValue(runtime.pointee, result.value), runtime)");
+            fs.writeFileSync(fnPath, fn);
 
-          p = base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptValuesBuffer.swift"
-          t = open(p).read()
-          old = """      let start = storage.baseAddress
-                if let start {
-                  for index in 0..<count {
-                    expo.emplaceUndefined(start + index)
-                  }
-                }
-                defer {
-                  if let start {
-                    expo.destroyValues(start, count)
-                  }
-                }
-                let buffer = JavaScriptValuesBuffer(runtime, start: start, count: count)
-                try JavaScriptActor.assumeIsolated {
-                  try emplaceValues(buffer, runtime)
-                }
-                return try body(buffer)"""
-          new = """      let start = UncheckedSendable(storage.baseAddress)
-                if let ptr = start.value {
-                  for index in 0..<count {
-                    expo.emplaceUndefined(ptr + index)
-                  }
-                }
-                defer {
-                  if let ptr = start.value {
-                    expo.destroyValues(ptr, count)
-                  }
-                }
-                try JavaScriptActor.assumeIsolated {
-                  try emplaceValues(JavaScriptValuesBuffer(runtime, start: start.value, count: count), runtime)
-                }
-                return try body(JavaScriptValuesBuffer(runtime, start: start.value, count: count))"""
-          assert old in t
-          open(p, "w").write(t.replace(old, new))
-          EOF
+            const bufPath = base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptValuesBuffer.swift";
+            let buf = fs.readFileSync(bufPath, "utf8");
+            buf = buf.replace("let start = storage.baseAddress", "let start = UncheckedSendable(storage.baseAddress)");
+            buf = buf.replace("if let start {", "if let ptr = start.value {");
+            buf = buf.replace("start + index", "ptr + index");
+            buf = buf.replace("expo.destroyValues(start, count)", "expo.destroyValues(ptr, count)");
+            buf = buf.replace("start: start,", "start: start.value,");
+            fs.writeFileSync(bufPath, buf);
 
-      - name: Generate iOS project
-        run: npx expo prebuild --platform ios --clean --no-install
+            const scriptPath = base + "/scripts/build-xcframework.sh";
+            let script = fs.readFileSync(scriptPath, "utf8").replace("    -quiet \\\n", "");
+            fs.writeFileSync(scriptPath, script);
+
+            console.log("ExpoModulesJSI patch applied.");
+          '
+
+      - name: Generate Native iOS Project
         env:
           CI: "1"
+        run: npx expo prebuild --platform ios --clean --no-install
 
-      - name: Install CocoaPods
-        run: pod install
-        working-directory: ios
+      - name: Disable signing and install CocoaPods
+        run: |
+          cd ios
+          node -e '
+            const fs = require("fs");
+            let podfile = fs.readFileSync("Podfile", "utf8");
+            const signingPatch = `
+              installer.pods_project.targets.each do |target|
+                target.build_configurations.each do |config|
+                  config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+                  config.build_settings["CODE_SIGNING_REQUIRED"] = "NO"
+                  config.build_settings["CODE_SIGN_IDENTITY"] = ""
+                  config.build_settings["EXPANDED_CODE_SIGN_IDENTITY"] = ""
+                end
+              end
+            `;
+            podfile = podfile.replace(
+              "post_install do |installer|",
+              "post_install do |installer|\n" + signingPatch
+            );
+            fs.writeFileSync("Podfile", podfile);
+          '
+          pod install
 
-      - name: Prebuild ExpoModulesJSI xcframework
+      - name: Prebuild ExpoModulesJSI framework
         run: |
           export PODS_ROOT="$PWD/ios/Pods"
           export PLATFORM_NAME="iphoneos"
           bash node_modules/expo-modules-jsi/apple/scripts/build-xcframework.sh
 
-      - name: Build unsigned app
+      - name: Build unsigned Release app
         run: |
-          cd ios
-          WORKSPACE=$(find . -maxdepth 1 -name '*.xcworkspace' -print -quit)
-          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
           set -o pipefail
-          xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" \
-            -configuration Release -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY='' build 2>&1 | tee xcodebuild.log
-          exit ${PIPESTATUS[0]}
+          export NODE_BINARY=$(which node)
+          cd ios
+          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
 
-      - name: Create IPA
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build 2>&1 | tee xcodebuild.log
+
+      - name: Show compiler errors if build fails
+        if: failure()
+        run: |
+          grep -nE "error:|fatal error|No such module|BUILD FAILED" ios/xcodebuild.log | tail -n 50 || true
+          tail -n 80 ios/xcodebuild.log || true
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-error-log
+          path: ios/xcodebuild.log
+
+      - name: Package IPA
         run: |
           mkdir -p Payload
           cp -R ios/build/Build/Products/Release-iphoneos/*.app Payload/
