@@ -32,7 +32,7 @@ jobs:
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Patch ExpoModulesJSI for installed Swift version
+      - name: Patch ExpoModulesJSI
         run: |
           node -e '
             const fs = require("fs");
@@ -46,16 +46,20 @@ jobs:
             pkg = pkg.replace(/\s*\"-Werror\",\s*\"[A-Za-z]+\",/g, "");
             fs.writeFileSync(base + "/Package.swift", pkg);
 
-            let rt = fs.readFileSync(base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift", "utf8");
+            const rtPath = base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift";
+            let rt = fs.readFileSync(rtPath, "utf8");
             rt = rt.replace(
               "name.wholeMatch(of: /^[a-zA-Z_$][a-zA-Z0-9_$]*$/)",
               "name.wholeMatch(of: try! Regex(#\"^[a-zA-Z_$][a-zA-Z0-9_$]*$\"#))"
             );
-            fs.writeFileSync(base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptRuntime.swift", rt);
+            fs.writeFileSync(rtPath, rt);
 
-            let promPath = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptPromise.swift";
-            let prom = fs.readFileSync(promPath, "utf8")
-              .replace("func allowRelease() {", "nonisolated init() {}\n\n    func allowRelease() {");
+            const promPath = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptPromise.swift";
+            let prom = fs.readFileSync(promPath, "utf8");
+            prom = prom.replace(
+              "func allowRelease() {",
+              "nonisolated init() {}\n\n    func allowRelease() {"
+            );
             fs.writeFileSync(promPath, prom);
 
             const objPath = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptObject.swift";
@@ -72,26 +76,54 @@ jobs:
 
             const fnPath = base + "/Sources/ExpoModulesJSI/Runtime/Values/JavaScriptFunction.swift";
             let fn = fs.readFileSync(fnPath, "utf8");
-            fn = fn.replace("nonisolated(unsafe) let arguments = storage.baseAddress!", "let arguments = UncheckedSendable(storage.baseAddress!)");
-            fn = fn.replace("nonisolated(unsafe) let result = arguments + argumentCount", "let result = UncheckedSendable(arguments.value + argumentCount)");
-            fn = fn.replace("arguments + index", "arguments.value + index");
-            fn = fn.replace("expo.destroyValues(arguments, argumentCount + 1)", "expo.destroyValues(arguments.value, argumentCount + 1)");
-            fn = fn.replace("start: arguments, count: argumentCount", "start: arguments.value, count: argumentCount");
-            fn = fn.replace("pointee, arguments, argumentCount, result)", "pointee, arguments.value, argumentCount, result.value)");
-            fn = fn.replace("JavaScriptUnownedValue(runtime.pointee, result), runtime)", "JavaScriptUnownedValue(runtime.pointee, result.value), runtime)");
+            fn = fn.replace(
+              "nonisolated(unsafe) let arguments = storage.baseAddress!",
+              "let arguments = UncheckedSendable(storage.baseAddress!)"
+            );
+            fn = fn.replace(
+              "nonisolated(unsafe) let result = arguments + argumentCount",
+              "let result = UncheckedSendable(arguments.value + argumentCount)"
+            );
+            fn = fn.replaceAll("arguments + index", "arguments.value + index");
+            fn = fn.replace(
+              "expo.destroyValues(arguments, argumentCount + 1)",
+              "expo.destroyValues(arguments.value, argumentCount + 1)"
+            );
+            fn = fn.replace(
+              "start: arguments, count: argumentCount",
+              "start: arguments.value, count: argumentCount"
+            );
+            fn = fn.replace(
+              "pointee, arguments, argumentCount, result)",
+              "pointee, arguments.value, argumentCount, result.value)"
+            );
+            fn = fn.replace(
+              "JavaScriptUnownedValue(runtime.pointee, result), runtime)",
+              "JavaScriptUnownedValue(runtime.pointee, result.value), runtime)"
+            );
             fs.writeFileSync(fnPath, fn);
 
             const bufPath = base + "/Sources/ExpoModulesJSI/Runtime/JavaScriptValuesBuffer.swift";
             let buf = fs.readFileSync(bufPath, "utf8");
-            buf = buf.replace("let start = storage.baseAddress", "let start = UncheckedSendable(storage.baseAddress)");
-            buf = buf.replace("if let start {", "if let ptr = start.value {");
-            buf = buf.replace("start + index", "ptr + index");
-            buf = buf.replace("expo.destroyValues(start, count)", "expo.destroyValues(ptr, count)");
-            buf = buf.replace("start: start,", "start: start.value,");
+            buf = buf.replace(
+              "let start = storage.baseAddress",
+              "let start = UncheckedSendable(storage.baseAddress)"
+            );
+            buf = buf.replaceAll(
+              "if let start {",
+              "if let ptr = start.value {"
+            );
+            buf = buf.replaceAll("start + index", "ptr + index");
+            buf = buf.replaceAll(
+              "expo.destroyValues(start, count)",
+              "expo.destroyValues(ptr, count)"
+            );
+            buf = buf.replaceAll("start: start,", "start: start.value,");
             fs.writeFileSync(bufPath, buf);
 
             const scriptPath = base + "/scripts/build-xcframework.sh";
-            let script = fs.readFileSync(scriptPath, "utf8").replace("    -quiet \\\n", "");
+            let script = fs.readFileSync(scriptPath, "utf8");
+            script = script.replace("    -quiet \\\n", "");
             fs.writeFileSync(scriptPath, script);
 
             console.log("ExpoModulesJSI patch applied.");
